@@ -1,0 +1,19 @@
+{
+  "name": "a7m-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test tests/*.test.mjs src/ui.test.mjs",
+    "test:browser": "node tests/browser.mjs"
+  },
+  "devDependencies": {
+    "@tanstack/react-query": "5.90.5",
+    "esbuild": "0.25.12",
+    "playwright": "1.56.1",
+    "puppeteer-core": "^25.16.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0"
+  }
+}
