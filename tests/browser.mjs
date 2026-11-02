@@ -18,6 +18,13 @@ const server = createServer(async(req,res) => {
     if(requestMode==='delayed') await new Promise(resolve=>setTimeout(resolve,700))
     res.setHeader('content-type','application/json');res.end(JSON.stringify(requestMode==='empty'?{...payload,columns:payload.columns.map(c=>({...c,tasks:[]}))}:payload));return
   }
+  if(req.url === '/test-api/models') {
+    res.setHeader('content-type','application/json')
+    res.end(JSON.stringify({source:'كتالوج اختبار فقط، ليس أسعار المستخدم',fetched_at:1767268800,stale:false,models:[
+      {id:'example/test-model',name:'Example model',provider:'example',description:'Published test description only',prices:{input:0.000001,output:0.000002,input_cache_read:null},context_length:32000,capabilities:['tools','image_input']},
+      {id:'example/unknown-price',name:'Unknown price model',provider:'example',description:'Test fixture missing pricing',prices:{input:null,output:null,input_cache_read:null},context_length:null,capabilities:[]}
+    ]}));return
+  }
   const name=req.url==='/'?'index.html':req.url==='/app.js'?'app.js':null
   if(!name){res.writeHead(404);res.end();return}
   res.setHeader('content-type',name.endsWith('.js')?'text/javascript':'text/html');res.end(await readFile(new URL('../preview/'+name,import.meta.url)))
@@ -38,7 +45,7 @@ try {
   assert.deepEqual(await page.locator('.a7m-task-detail dt').allTextContents(),['آخر ملخص تشغيل متاح','آخر ملخص تشغيل متاح'])
   assert.equal(await page.locator('.a7m-task-updated').count(),0,'native Task has no updated_at')
   assert.equal(await page.getByText('سبب التوقف',{exact:true}).count(),0,'native Task has no blocked_reason')
-  assert.ok((await page.locator('.a7m-context').innerText()).includes('٢٠٢٦')===false) // display intentionally omits year
+  assert.ok((await page.locator('#tabpanel-tasks .a7m-context').innerText()).includes('٢٠٢٦')===false) // display intentionally omits year
   await page.screenshot({path:'artifacts/dashboard-test-data.png'})
   await page.getByRole('button',{name:'فتح Kanban الأصلي'}).first().click()
   assert.equal(await page.evaluate(()=>window.__navigation),'/kanban')
@@ -54,9 +61,21 @@ try {
     await page.setViewportSize({width,height:900});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true)
   }
   await page.emulateMedia({reducedMotion:'reduce'});mode='delayed';await page.reload()
-  await page.locator('.a7m-loading').waitFor();assert.equal(await page.locator('.a7m-welcome').count(),0)
+  await page.locator('#tabpanel-tasks .a7m-loading').waitFor();assert.equal(await page.locator('.a7m-welcome').count(),0)
   await page.locator('.a7m-column').first().waitFor()
-  assert.ok((await page.evaluate(()=>window.__calls)).every(c=>c.options.method==='GET'&&c.path==='/snapshot'))
+  assert.ok((await page.evaluate(()=>window.__calls)).every(c=>c.options.method==='GET'&&(c.path==='/snapshot'||c.path==='/models')))
+  assert.equal(await page.evaluate(()=>window.__calls.filter(c=>c.path==='/models').length),0,'catalog is lazy')
+  await page.getByRole('tab',{name:'المهام',exact:true}).focus()
+  await page.keyboard.press('ArrowLeft')
+  await page.locator('.a7m-catalog-count').filter({hasText:'نتائج 2 من 2 موديل'}).waitFor()
+  assert.equal(await page.getByRole('tab',{name:'دليل الموديلات'}).getAttribute('aria-selected'),'true')
+  assert.ok((await page.locator('.a7m-model-row').first().innerText()).includes('$1.000000'))
+  await page.getByRole('searchbox').fill('unknown-price')
+  await page.locator('.a7m-catalog-count').filter({hasText:'نتائج 1 من 2 موديل'}).waitFor()
+  assert.ok((await page.locator('.a7m-model-row').innerText()).includes('غير متاح'))
+  await page.getByRole('searchbox').fill('')
+  await page.screenshot({path:'artifacts/models-test-data.png'})
+  await page.getByRole('tab',{name:'المهام',exact:true}).click()
   const scoped = await browser.newPage({reducedMotion:'reduce'})
   scoped.on('pageerror', e => errors.push(e.message))
   mode='full'

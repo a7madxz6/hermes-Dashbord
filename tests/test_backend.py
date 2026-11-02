@@ -226,7 +226,8 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(response.json()["boardLabel"], "فريق العمليات")
         self.assertNotIn("/private", response.text)
         self.assertNotIn("never-return", response.text)
-        self.assertEqual([(route.path, route.methods) for route in module.router.routes], [("/snapshot", {"GET"})])
+        expected_routes = sorted([("/snapshot", {"GET"}), ("/models", {"GET"})])
+        self.assertEqual(sorted((route.path, route.methods) for route in module.router.routes), expected_routes)
         for method in ("post", "put", "patch", "delete"):
             self.assertEqual(getattr(client, method)("/snapshot").status_code, 405)
 

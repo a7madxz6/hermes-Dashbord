@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { filterByProvider, filterByCapability, searchModels, sortByPrice, calculateCost, formatUsd, formatPricePerMillion, getUniqueProviders, getUniqueCapabilities, getCapabilityLabel } from './models.mjs';
 
 export function glyphFrame(elapsed, index, count) {
   const stagger = (index / Math.max(1, count - 1)) * 440;
@@ -272,4 +273,150 @@ export function DashboardView({ snapshot, loading, error, refreshing, onRefresh,
       <footer className="a7m-footer"><span>مصدر البيانات <bdi dir="ltr">Hermes Kanban</bdi></span><span>للتعديل، استخدم اللوحة الأصلية.</span></footer>
     </div>
   </div>;
+}
+
+function ModelRow({ model }) {
+  const prices = model.prices || {}
+  return <details className="a7m-model-row">
+    <summary>
+      <span className="a7m-model-name"><bdi dir="ltr">{model.name}</bdi></span>
+      <span className="a7m-model-id" dir="ltr">{model.id}</span>
+      <span className="a7m-model-provider" dir="ltr">{model.provider || '—'}</span>
+      <span className="a7m-model-price" dir="ltr">{formatPricePerMillion(prices.input)}</span>
+      <span className="a7m-model-price" dir="ltr">{formatPricePerMillion(prices.output)}</span>
+      <span className="a7m-model-context" dir="ltr">{model.context_length?.toLocaleString('ar') ?? 'غير متاح'}</span>
+    </summary>
+    <div className="a7m-model-detail">
+      {model.description && <div><strong>وصف المزوّد (كما نُشر)</strong><p className="a7m-model-desc" dir="auto">{model.description}</p></div>}
+      {model.capabilities?.length > 0 && <div className="a7m-model-caps">{model.capabilities.map(cap => <span className="a7m-model-cap" key={cap}>{getCapabilityLabel(cap)}</span>)}</div>}
+    </div>
+  </details>;
+}
+
+export function ModelCatalog({ models, meta, loading, error, onRefresh }) {
+  const [query, setQuery] = useState('')
+  const [page, setPage] = useState(1)
+  const [provider, setProvider] = useState('')
+  const [capability, setCapability] = useState('')
+  const [sortField, setSortField] = useState('input')
+  const [sortDir, setSortDir] = useState('asc')
+  const [showCalc, setShowCalc] = useState(false)
+  const [calcInput, setCalcInput] = useState('1000')
+  const [calcOutput, setCalcOutput] = useState('500')
+  const [calcCache, setCalcCache] = useState('0')
+  const [selectedModel, setSelectedModel] = useState(null)
+
+  const allModels = Array.isArray(models) ? models : []
+  const providers = getUniqueProviders(allModels)
+  const capabilities = getUniqueCapabilities(allModels)
+  let filtered = searchModels(allModels, query)
+  filtered = filterByProvider(filtered, provider || null)
+  filtered = filterByCapability(filtered, capability || null)
+  filtered = sortByPrice(filtered, sortField, sortDir)
+  const total = allModels.length
+  const shown = filtered.length
+  const pageCount = Math.max(1, Math.ceil(shown / 50))
+  const currentPage = Math.min(page, pageCount)
+  const visible = filtered.slice((currentPage - 1) * 50, currentPage * 50)
+
+  let costResult = null
+  let costError = null
+  if (showCalc && selectedModel) {
+    try {
+      const m = allModels.find(m => m.id === selectedModel)
+      if (m) {
+        costResult = calculateCost(m.prices, calcInput, calcOutput, calcCache)
+      }
+    } catch (error) {
+      costError = error.message.includes('rate')
+        ? 'التكلفة غير متاحة: سعر أحد أنواع الرموز المستخدمة غير منشور.'
+        : 'أدخل أعداد رموز صحيحة غير سالبة من 0 إلى 1,000,000,000 في جميع الحقول.'
+    }
+  }
+
+  const stale = meta?.stale
+  const fetchedAt = typeof meta?.fetched_at === 'number' ? new Date(meta.fetched_at * 1000) : null
+  const fetchedAtStr = fetchedAt ? new Intl.DateTimeFormat('ar', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(fetchedAt) : null
+
+  return <>
+    <div className="a7m-catalog">
+      <div className="a7m-topbar">
+        <div className="a7m-brand"><h1 dir="ltr" lang="en">A7M Dashbord</h1><span className="a7m-readonly">عرض فقط</span></div>
+        <div className="a7m-toolbar">
+          <button type="button" className="a7m-button a7m-button-primary" onClick={onRefresh} disabled={loading || !onRefresh} aria-busy={Boolean(loading)}>
+            {loading ? 'جارٍ التحميل…' : 'تحديث الموديلات'}
+          </button>
+        </div>
+      </div>
+      <dl className="a7m-context">
+        <div><dt>المصدر</dt><dd><bdi>{meta?.source || '—'}</bdi></dd></div>
+        <div><dt>آخر تحديث</dt><dd><bdi>{fetchedAtStr || '—'}</bdi></dd></div>
+        {stale && <div><dt>ملاحظة</dt><dd><bdi>البيانات المخزنة قديمة بسبب تعذر التحديث.</bdi></dd></div>}
+      </dl>
+      {error && <div className="a7m-notice" role="alert"><bdi>{error}</bdi></div>}
+      {loading && allModels.length === 0 && <div className="a7m-loading" role="status"><p>جارٍ تحميل دليل الموديلات…</p></div>}
+      {!loading && allModels.length === 0 && !error && <div className="a7m-empty"><h3>لم تصل بيانات الموديلات بعد</h3><p>أعد تحميل البيانات أو تحقق من الاتصال.</p></div>}
+      {allModels.length > 0 && <>
+        <div className="a7m-catalog-tools">
+          <div className="a7m-catalog-filters">
+            <label><span>بحث</span><input type="search" className="a7m-catalog-input" dir="ltr" placeholder="اسم الموديل…" value={query} onInput={e => { setQuery(e.target.value); setPage(1) }} /></label>
+            <label><span>المزوّد</span><select aria-label="المزوّد" className="a7m-catalog-select" value={provider} onChange={e => { setProvider(e.target.value); setPage(1) }}>
+              <option value="">الكل</option>
+              {providers.map(p => <option key={p} value={p}>{p}</option>)}
+            </select></label>
+            <label><span>الإمكانيات</span><select aria-label="الإمكانيات" className="a7m-catalog-select" value={capability} onChange={e => { setCapability(e.target.value); setPage(1) }}>
+              <option value="">الكل</option>
+              {capabilities.map(c => <option key={c} value={c}>{getCapabilityLabel(c)}</option>)}
+            </select></label>
+          </div>
+          <div className="a7m-catalog-sort">
+            <label htmlFor="a7m-price-sort">ترتيب حسب</label>
+            <select id="a7m-price-sort" className="a7m-catalog-select" value={sortField} onChange={e => { setSortField(e.target.value); setPage(1) }}>
+              <option value="input">سعر الإدخال</option>
+              <option value="output">سعر الإخراج</option>
+            </select>
+            <button type="button" className="a7m-button a7m-button-sort" aria-label="عكس ترتيب السعر" onClick={() => { setSortDir(sortDir === 'asc' ? 'desc' : 'asc'); setPage(1) }}>
+              {sortDir === 'asc' ? '↑' : '↓'}
+            </button>
+          </div>
+        </div>
+        <div className="a7m-catalog-count"><span>نتائج {shown} من {total} موديل · عرض {shown ? (currentPage - 1) * 50 + 1 : 0}–{Math.min(currentPage * 50, shown)}</span></div>
+        <div className="a7m-catalog-table" role="region" aria-label="جدول الموديلات" tabIndex={0}>
+          <div className="a7m-catalog-header">
+            <span>الاسم</span><span>المعرّف</span><span>المزوّد</span><span>الإدخال $ / مليون</span><span>الإخراج $ / مليون</span><span>السياق</span>
+          </div>
+          {filtered.length === 0 ? <div className="a7m-catalog-empty">لا توجد نتائج تطابق البحث.</div> :
+            visible.map(m => <ModelRow key={m.id} model={m} />)}
+        </div>
+        <nav className="a7m-catalog-pagination" aria-label="صفحات الموديلات">
+          <button type="button" className="a7m-button a7m-button-secondary" disabled={currentPage === 1} onClick={() => setPage(currentPage - 1)} aria-label="الصفحة السابقة">السابق</button>
+          <span role="status">صفحة {currentPage} من {pageCount}</span>
+          <button type="button" className="a7m-button a7m-button-secondary" disabled={currentPage === pageCount} onClick={() => setPage(currentPage + 1)} aria-label="الصفحة التالية">التالي</button>
+        </nav>
+        <details className="a7m-calc-section" onToggle={e => { setShowCalc(e.target.open); if (!e.target.open) setSelectedModel(null) }}>
+          <summary className="a7m-calc-head"><h3>حاسبة التكلفة</h3></summary>
+          <div className="a7m-calc-body">
+            <div className="a7m-calc-fields">
+              <label><span>الموديل</span>
+                <select aria-label="الموديل" className="a7m-catalog-select" value={selectedModel || ''} onChange={e => setSelectedModel(e.target.value)}>
+                  <option value="">اختر موديل…</option>
+                  {allModels.map(m => <option key={m.id} value={m.id}>{m.name} ({m.id})</option>)}
+                </select>
+              </label>
+              <label><span>رموز الإدخال</span><input type="number" className="a7m-catalog-input" dir="ltr" value={calcInput} onInput={e => setCalcInput(e.target.value)} min="0" /></label>
+              <label><span>رموز الإخراج</span><input type="number" className="a7m-catalog-input" dir="ltr" value={calcOutput} onInput={e => setCalcOutput(e.target.value)} min="0" /></label>
+              <label><span>رموز ذاكرة التخزين</span><input type="number" className="a7m-catalog-input" dir="ltr" value={calcCache} onInput={e => setCalcCache(e.target.value)} min="0" /></label>
+            </div>
+            {costError && <p className="a7m-calc-error a7m-notice" role="alert">{costError}</p>}
+            {costResult && <div className="a7m-calc-result">
+              <p>التكلفة المقدرة: <bdi dir="ltr">{formatUsd(costResult.total)} USD</bdi></p>
+              <p className="a7m-calc-detail">الإدخال: <bdi dir="ltr">{formatUsd(costResult.inputCost)}</bdi> | الإخراج: <bdi dir="ltr">{formatUsd(costResult.outputCost)}</bdi>{costResult.inputCacheCost > 0 && <> | ذاكرة تخزين: <bdi dir="ltr">{formatUsd(costResult.inputCacheCost)}</bdi></>}</p>
+              <p className="a7m-calc-note">تقدير لتكلفة الرموز فقط باستخدام الأسعار الخام لكل رمز. الإدخال غير المخزن منفصل عن رموز قراءة التخزين، ولا تجمع الرموز نفسها مرتين. لا تشمل رسوم الطلبات أو الوسائط أو الأدوات.</p>
+            </div>}
+          </div>
+        </details>
+        <footer className="a7m-footer"><span>مصدر البيانات: {meta?.source || 'دليل عام'}</span><span>الأسعار المعروضة USD لكل مليون رمز؛ الحاسبة تستخدم السعر الخام لكل رمز.</span></footer>
+      </>}
+    </div>
+  </>;
 }
