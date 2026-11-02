@@ -1,7 +1,7 @@
 {
   "name": "a7m-dashboard",
   "label": "A7M Dashboard",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Read-only backend for the native Desktop dashboard.",
   "api": "plugin_api.py",
   "tab": {"hidden": true}

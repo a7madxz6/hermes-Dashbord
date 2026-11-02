@@ -107,6 +107,53 @@ test('dashboard preserves statuses, details, missing/error states and narrow con
   } finally { await browser.close(); }
 });
 
+test('execution history preserves unknown usage and separates agent from harness', { timeout: 20000 }, async () => {
+  const bundle = await build({stdin: {contents: `import React from 'react'; import {createRoot} from 'react-dom/client'; import {ExecutionHistory} from './ui.jsx';
+    const root = createRoot(document.getElementById('root')); window.renderExecutions = props => root.render(React.createElement('div', {className:'a7m-dashboard', 'data-theme':'a7m-terminal', dir:'rtl'}, React.createElement(ExecutionHistory, {...props, onPage: page => window.nextPage = page, onRefresh: () => window.refreshed = true})));`, resolveDir: fileURLToPath(new URL('.', import.meta.url)), loader:'jsx'}, bundle:true, write:false, format:'iife', jsx:'automatic'});
+  const browser = await chromium.launch({headless:true, executablePath:process.env.CHROME_PATH || undefined, args:['--no-sandbox']});
+  try {
+    const page = await browser.newPage();
+    page.setDefaultTimeout(3000);
+    await page.setContent('<div id="root"></div>');
+    await page.addStyleTag({content:readFileSync(new URL('./style.css', import.meta.url), 'utf8')});
+    await page.addScriptTag({content:bundle.outputFiles[0].text});
+    const data = {boardLabel:'fixture Kanban',now:1767268800, running:[{run_id:'run-live',task_id:'task-fixture',task_title:'Fixture running task',status:'running',profile:'fixture-profile',agent:null,harness:'Hermes',session:null}], history:{page:1,limit:1,total:2,rows:[{run_id:'run-complete',task_id:'task-fixture',task_title:'Fixture completed attempt',status:'done',agent:'fixture-agent',harness:'Hermes',session:{id:'fixture-session',source:'Hermes',model:'provider/model',model_scope:'session',usage_scope:'session',mapping_source:'task_events.owner_admitted',tokens:{input:10,output:2,cache_read:5,cache_write:0,reasoning:null,total:12,total_rule:'input + output; cache and reasoning not added'},cost:{actual:0,estimated:0.02,status:'actual',currency:'USD',source:'fixture billing'},models:[{model:'provider/model',provider:'provider',tokens:{input:10,output:2},cost:{status:'unavailable'}}]}}]},opencode:[{id:'fixture-external',title:'Fixture OpenCode session',source:'OpenCode',harness:'OpenCode',agent:'coding-worker',models:[{model:'model-A',provider:'provider-A',agent:'coding-worker'},{model:'model-B',provider:'provider-B',agent:'review-worker'}],usage_scope:'session',status:'last_activity',time_created:1767268800000,time_updated:1767268800000,tokens:{input:null,output:3,cache_read:null,cache_write:null,total:null},cost:{actual:5,estimated:0.03,status:'estimated',currency:'USD',source:'fixture estimate'}}],opencode_history:{total:1,page:1,limit:1,status:'available'}};
+    await page.evaluate(data => window.renderExecutions({data,page:1}), data);
+    await page.getByRole('heading',{name:'يجري الآن · Kanban'}).waitFor();
+    const running = page.locator('.a7m-execution-row').filter({hasText:'run-live'});
+    assert.ok((await running.innerText()).includes('غير متاح'));
+    assert.equal((await running.innerText()).includes('$0'),false);
+    const completed = page.locator('.a7m-execution-row').filter({hasText:'run-complete'});
+    assert.ok((await completed.innerText()).includes('fixture-agent'));
+    assert.ok((await completed.innerText()).includes('Hermes'));
+    assert.ok((await completed.innerText()).includes('12'));
+    assert.ok((await completed.innerText()).includes('$0.000000'));
+    assert.ok((await completed.innerText()).includes('فعلية'));
+    assert.ok((await completed.innerText()).includes('مستوى الجلسة'));
+    const external = page.locator('.a7m-execution-row').filter({hasText:'fixture-external'});
+    assert.ok((await external.innerText()).includes('حالة التشغيل غير متاحة'));
+    assert.ok((await external.innerText()).includes('$0.030000'));
+    assert.equal((await external.innerText()).includes('$5.000000'),false,'status gates billing amounts');
+    await external.locator('summary').click();
+    assert.ok((await external.innerText()).includes('model-A'));
+    assert.ok((await external.innerText()).includes('model-B'));
+    assert.ok((await external.innerText()).includes('provider-B'));
+    await page.getByRole('button',{name:'صفحة السجل التالية'}).click();
+    assert.equal(await page.evaluate(() => window.nextPage),2);
+    await page.evaluate(data => window.renderExecutions({data:{...data,history:{...data.history,rows:[],total:0},opencode_history:{...data.opencode_history,total:2}},page:1}),data);
+    assert.equal(await page.getByRole('button',{name:'صفحة السجل التالية'}).isDisabled(),false,'external pages remain reachable without Kanban history');
+    await page.evaluate(data => window.renderExecutions({data:{...data,history:{...data.history,rows:[{...data.history.rows[0],session:{...data.history.rows[0].session,tokens:{input:null,output:2},cost:{actual:4,estimated:3,status:'unavailable'}}}]}},page:1}),data);
+    const unknownCost = page.locator('.a7m-execution-row').filter({hasText:'run-complete'});
+    assert.equal(await unknownCost.getByText('$4.000000',{exact:true}).count(),0);
+    assert.ok((await unknownCost.locator('.a7m-execution-cost').first().innerText()).includes('غير متاح'));
+    await page.evaluate(data => window.renderExecutions({data,page:1,error:'fixture failure'}),data);
+    assert.ok((await page.getByRole('alert').innerText()).includes('قديمة'));
+    await page.evaluate(() => window.renderExecutions({loading:true,page:1}));
+    await page.getByRole('status').filter({hasText:'جارٍ تحميل سجل التنفيذ'}).waitFor();
+    assert.equal(await page.locator('.a7m-execution-row').count(),0);
+  } finally {await browser.close();}
+});
+
 test('model catalog shows per-million prices and honest calculator validation', { timeout: 20000 }, async () => {
   const bundle = await build({
     stdin: { contents: `import React from 'react'; import {createRoot} from 'react-dom/client'; import {ModelCatalog} from './ui.jsx';

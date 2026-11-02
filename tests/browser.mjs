@@ -18,6 +18,16 @@ const server = createServer(async(req,res) => {
     if(requestMode==='delayed') await new Promise(resolve=>setTimeout(resolve,700))
     res.setHeader('content-type','application/json');res.end(JSON.stringify(requestMode==='empty'?{...payload,columns:payload.columns.map(c=>({...c,tasks:[]}))}:payload));return
   }
+  if(req.url.startsWith('/test-api/executions?')) {
+    if(mode==='malformed-executions') {res.setHeader('content-type','application/json');res.end(JSON.stringify({running:[],history:{rows:[],page:0,limit:25,total:0},opencode:[],opencode_history:{total:0,page:0,limit:25,status:'available'}}));return}
+    const requestMode = mode;
+    const source = req.headers['x-test-source'];
+    const page = Number(new URL(req.url,'http://fixture').searchParams.get('page'));
+    if(requestMode==='error') {res.writeHead(503);res.end('{}');return}
+    if(requestMode==='held-executions') {heldStarted=true;await new Promise(resolve => {releaseHeld=resolve})}
+    res.setHeader('content-type','application/json');
+    res.end(JSON.stringify({board:'fixture',boardLabel:'Explicit execution test fixture',now:1767268800,running:[],history:{rows:[{run_id:`fixture-run-${page}`,task_id:'fixture-task',task_title:`Execution fixture source-${source} page-${page}`,profile:'fixture-profile',status:'done',harness:'Hermes',agent:null,session:null}],total:26,page,limit:25},opencode:[],opencode_history:{total:null,page,limit:25,status:'disabled'}}));return;
+  }
   if(req.url === '/test-api/models') {
     res.setHeader('content-type','application/json')
     res.end(JSON.stringify({source:'كتالوج اختبار فقط، ليس أسعار المستخدم',fetched_at:1767268800,stale:false,models:[
@@ -75,6 +85,25 @@ try {
   assert.ok((await page.locator('.a7m-model-row').innerText()).includes('غير متاح'))
   await page.getByRole('searchbox').fill('')
   await page.screenshot({path:'artifacts/models-test-data.png'})
+  assert.equal(await page.evaluate(()=>window.__calls.filter(c=>c.path.startsWith('/executions')).length),0,'executions are lazy')
+  await page.getByRole('tab',{name:'دليل الموديلات',exact:true}).focus()
+  await page.keyboard.press('End')
+  await page.getByRole('heading',{name:'التنفيذ والسجل',exact:true}).waitFor()
+  await page.getByText('Execution fixture source-A page-1',{exact:true}).waitFor()
+  assert.equal(await page.getByRole('tab',{name:'التنفيذ والسجل',exact:true}).getAttribute('aria-selected'),'true')
+  await page.getByRole('button',{name:'صفحة السجل التالية'}).click()
+  await page.getByText('Execution fixture source-A page-2',{exact:true}).waitFor()
+  await page.keyboard.press('Tab')
+  for(const width of [375,640,1100]) {
+    await page.setViewportSize({width,height:900});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true)
+  }
+  mode='error';await page.getByRole('button',{name:'تحديث سجل التنفيذ'}).click()
+  await page.locator('#tabpanel-executions [role="alert"]').filter({hasText:'قديمة'}).waitFor()
+  await page.getByRole('tab',{name:'التنفيذ والسجل',exact:true}).focus()
+  await page.keyboard.press('Home')
+  assert.equal(await page.getByRole('tab',{name:'المهام',exact:true}).getAttribute('aria-selected'),'true')
+  await page.keyboard.press('ArrowRight')
+  assert.equal(await page.getByRole('tab',{name:'التنفيذ والسجل',exact:true}).getAttribute('aria-selected'),'true','RTL Right wraps to last tab')
   await page.getByRole('tab',{name:'المهام',exact:true}).click()
   const scoped = await browser.newPage({reducedMotion:'reduce'})
   scoped.on('pageerror', e => errors.push(e.message))
@@ -130,6 +159,38 @@ try {
   await scoped.evaluate(() => window.__queryClient.setQueryData(window.__activeKey,window.__activeData))
   await scoped.getByText(/source-A/).waitFor()
   console.log('PASS: rendered cache data must match both canonical epoch and profile tags.')
+  mode='full'
+  await scoped.getByRole('tab',{name:'التنفيذ والسجل',exact:true}).click()
+  await scoped.getByText('Execution fixture source-A page-1',{exact:true}).waitFor()
+  await scoped.getByRole('button',{name:'صفحة السجل التالية'}).click()
+  await scoped.getByText('Execution fixture source-A page-2',{exact:true}).waitFor()
+  mode='held-executions';heldStarted=false
+  await scoped.getByRole('button',{name:'تحديث سجل التنفيذ'}).click()
+  for(let attempt=0; !heldStarted && attempt<100; attempt++) await new Promise(resolve=>setTimeout(resolve,10))
+  assert.equal(heldStarted,true)
+  mode='error'
+  await scoped.evaluate(()=>window.__activate('B'))
+  await scoped.waitForFunction(()=>document.querySelectorAll('.a7m-execution-row').length===0,null,{timeout:1500})
+  await scoped.locator('#tabpanel-executions [role="alert"]').waitFor()
+  assert.equal(await scoped.locator('#tabpanel-executions [role="alert"]').getByText(/قديمة/).count(),0)
+  const executionSettled = await scoped.evaluate(()=>window.__settled.length)
+  releaseHeld()
+  await scoped.waitForFunction(n=>window.__settled.length>n,executionSettled)
+  assert.equal(await scoped.evaluate(()=>window.__settled.at(-1).result),'error')
+  assert.equal(await scoped.locator('.a7m-execution-row').count(),0)
+  mode='full';await scoped.getByRole('button',{name:'تحديث سجل التنفيذ'}).click()
+  await scoped.getByText('Execution fixture source-B page-1',{exact:true}).waitFor()
+  mode='malformed-executions'
+  await scoped.evaluate(()=>window.__host.state.profile.set('execution-other-profile'))
+  await scoped.locator('#tabpanel-executions [role="alert"]').waitFor()
+  assert.equal(await scoped.locator('.a7m-execution-row').count(),0,'malformed page response is not a false empty history')
+  mode='full';await scoped.getByRole('button',{name:'تحديث سجل التنفيذ'}).click()
+  await scoped.getByText('Execution fixture source-B page-1',{exact:true}).waitFor()
+  await scoped.reload()
+  await scoped.getByRole('tab',{name:'التنفيذ والسجل',exact:true}).click()
+  await scoped.getByText('Execution fixture source-A page-1',{exact:true}).waitFor()
+  assert.ok((await scoped.evaluate(()=>window.__calls)).every(c=>c.options.method==='GET'))
+  console.log('PASS: executions lazy query, keyboard tabs, paging, reload, malformed response, profile/epoch isolation and outstanding response rejection.')
   await scoped.close()
   assert.deepEqual(errors,[])
   console.log('PASS: bundled plugin registration, intro auto-transition, real-shaped fixture binding, GET-only, stale warning, profile isolation, empty/loading/error, reduced motion, responsive widths, no JS errors.')

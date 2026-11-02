@@ -209,6 +209,27 @@
 .a7m-tab[aria-selected="true"] { background: var(--color-accent-wash); color: var(--color-ink); border-color: var(--color-accent); }
 .a7m-tab:hover:not([aria-selected="true"]) { background: var(--color-paper-3); color: var(--color-ink); }
 
+/* Execution ledger: existing Terminal tokens, no extra theme. */
+.a7m-tabs { overflow-x: auto; }
+.a7m-tab { flex: none; }
+.a7m-executions { min-width: 0; }
+.a7m-executions > section { margin-bottom: var(--space-lg); }
+.a7m-executions .a7m-section-head { min-height: 44px; padding-top: var(--space-md); }
+.a7m-execution-row { min-width: 0; border-bottom: 1px solid var(--color-rule); padding: var(--space-md) 0; }
+.a7m-execution-row > header { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-xs); margin-bottom: var(--space-sm); }
+.a7m-execution-row > header > span, .a7m-execution-provenance { font-size: var(--text-sm); color: var(--color-muted); overflow-wrap: anywhere; }
+.a7m-execution-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--space-sm); padding-block: var(--space-xs); }
+.a7m-execution-fields > div { min-width: 0; }
+.a7m-execution-fields dt { font-size: var(--text-sm); color: var(--color-muted); }
+.a7m-execution-fields dd { overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.a7m-execution-models { margin-block: var(--space-sm); background: var(--color-paper-2); padding: var(--space-sm); }
+.a7m-execution-models > summary { cursor: pointer; min-height: 44px; }
+.a7m-execution-models > div { margin-top: var(--space-sm); }
+.a7m-execution-provenance { padding-block: var(--space-xs); }
+@container a7m (max-width: 640px) {
+  .a7m-execution-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 /* Model catalog */
 .a7m-catalog { min-width: 0; }
 .a7m-catalog-tools { display: flex; flex-wrap: wrap; gap: var(--space-md); align-items: end; padding-bottom: var(--space-md); }

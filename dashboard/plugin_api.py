@@ -1,14 +1,16 @@
 """Read-only current-board snapshot and public model catalog, mounted by Hermes's authenticated plugin host."""
 import json
 import math
+import hermes_constants
 from contextlib import closing
 import sqlite3
 import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from hermes_cli import kanban_db
 from hermes_cli.kanban_workflow import DEFAULT_WORKFLOW
 
@@ -200,3 +202,225 @@ def models():
         return _get_models()
     except Exception:
         raise HTTPException(503, "تعذر الاتصال بدليل الموديلات العام. لا توجد بيانات سابقة متاحة.")
+
+
+_PROJECT_DIR = str(Path("/opt/data/projects/hermes-Dashbord").resolve())
+_OPENCODE_DB = Path("/opt/data/.local/share/opencode/opencode.db")
+_TOKEN_RULE = "input + output; cache and reasoning not added"
+
+
+def _state_db_path():
+    return hermes_constants.get_hermes_home().resolve() / "state.db"
+
+
+def _safe_str(val):
+    return val if isinstance(val, str) else None
+
+
+def _safe_int(val):
+    if type(val) is int and val >= 0:
+        return val
+    if type(val) is float and math.isfinite(val) and val >= 0 and val.is_integer():
+        return int(val)
+    return None
+
+
+def _safe_float(val):
+    return val if type(val) in (int, float) and math.isfinite(val) and val >= 0 else None
+
+
+def _tokens(row, prefix="", suffix=""):
+    values = {key: _safe_int(row.get(prefix + key + suffix))
+              for key in ("input", "output", "cache_read", "cache_write", "reasoning")}
+    return {**values,
+            "total": (values["input"] + values["output"]
+                      if values["input"] is not None and values["output"] is not None else None),
+            "total_rule": _TOKEN_RULE}
+
+
+def _cost(row):
+    status = row.get("cost_status")
+    actual = _safe_float(row.get("actual_cost_usd")) if status == "actual" else None
+    estimate = _safe_float(row.get("estimated_cost_usd")) if status == "estimated" else None
+    return {"actual": actual, "estimated": estimate,
+            "status": "actual" if actual is not None else "estimated" if estimate is not None else "unavailable",
+            "currency": "USD", "source": (row.get("cost_source")
+                if row.get("cost_source") in ("OpenCode.message", "OpenCode.session") else "Hermes.persisted_usage")}
+
+
+def _format_session(row):
+    # A requested route and default zero counters do not prove an API call occurred.
+    recorded = (_safe_int(row.get("api_call_count")) or 0) > 0 or any(
+        (_safe_int(row.get(key + "_tokens")) or 0) > 0
+        for key in ("input", "output", "cache_read", "cache_write", "reasoning"))
+    return {"id": row["id"], "model": _safe_str(row.get("model")) if recorded else None,
+            "source": "Hermes", "model_scope": "session", "models": [],
+            "usage_scope": "session", "mapping_source": "task_events.owner_admitted",
+            "started_at": row.get("started_at"), "ended_at": row.get("ended_at"),
+            "tokens": _tokens(row if recorded else {}, suffix="_tokens"), "cost": _cost(row)}
+
+
+def _resolve_session_map(conn, runs):
+    """Exact admitted attempt -> current-profile session; never use tasks.session_id."""
+    if not runs:
+        return {}
+    state_path = _state_db_path()
+    if not state_path.is_file():
+        return {}
+    try:
+        # One latest marker per exact task/run pair, including retries independently.
+        markers = conn.execute("""SELECT e.task_id, e.run_id, e.payload FROM task_events e
+            JOIN task_runs r ON r.id=e.run_id AND r.task_id=e.task_id
+            WHERE e.kind='owner_admitted' AND e.id=(SELECT MAX(n.id) FROM task_events n
+                WHERE n.task_id=e.task_id AND n.run_id=e.run_id AND n.kind='owner_admitted')""").fetchall()
+        requested = {(r["task_id"], r["run_id"]) for r in runs}
+        bindings = {}
+        for marker in markers:
+            if (marker["task_id"], marker["run_id"]) not in requested:
+                continue
+            try:
+                payload = json.loads(marker["payload"])
+                if (not isinstance(payload, dict) or not isinstance(payload.get("session_id"), str)
+                        or not payload["session_id"] or not isinstance(payload.get("db"), str)
+                        or Path(payload["db"]).resolve() != state_path):
+                    continue
+                bindings[marker["run_id"]] = payload["session_id"]
+            except (TypeError, ValueError, OSError, RuntimeError):
+                continue
+        sessions = {}
+        ids = sorted(set(bindings.values()))
+        with closing(sqlite3.connect(state_path.as_uri() + "?mode=ro", uri=True)) as owner:
+            owner.row_factory = sqlite3.Row
+            owner.execute("PRAGMA query_only=ON")
+            owner.execute("BEGIN")
+            # Batch below SQLite's variable limit even with many open attempts.
+            for start in range(0, len(ids), 500):
+                batch = ids[start:start + 500]
+                placeholders = ",".join("?" for _ in batch)
+                for row in owner.execute(f"SELECT * FROM sessions WHERE id IN ({placeholders})", batch):
+                    sessions[row["id"]] = _format_session(dict(row))
+                if owner.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_model_usage'").fetchone():
+                    rows = owner.execute(f"SELECT * FROM session_model_usage WHERE session_id IN ({placeholders}) ORDER BY model,billing_provider,task", batch)
+                    for row in rows:
+                        usage = dict(row)
+                        if usage["session_id"] in sessions:
+                            sessions[usage["session_id"]]["models"].append({
+                                "model": _safe_str(usage.get("model")),
+                                "provider": _safe_str(usage.get("billing_provider")),
+                                "tokens": _tokens(usage, suffix="_tokens"), "cost": _cost(usage)})
+        return {rid: sessions[sid] for rid, sid in bindings.items() if sid in sessions}
+    except (sqlite3.Error, OSError, ValueError, RuntimeError):
+        return {}
+
+
+def _complete_sum(values):
+    return sum(values) if values and all(v is not None for v in values) else None
+
+
+def _format_opencode(row, messages):
+    models = []
+    for msg in messages:
+        model = {"model": _safe_str(msg.get("modelID")), "provider": _safe_str(msg.get("providerID")),
+                 "agent": _safe_str(msg.get("agent"))}
+        if model not in models:
+            models.append(model)
+    if messages:
+        counters = []
+        for msg in messages:
+            raw = msg.get("tokens")
+            raw = raw if isinstance(raw, dict) else {}
+            cache = raw.get("cache")
+            cache = cache if isinstance(cache, dict) else {}
+            counters.append(_tokens(dict(raw, cache_read=cache.get("read"), cache_write=cache.get("write"))))
+        tokens = _tokens({key: _complete_sum([c[key] for c in counters])
+                          for key in ("input", "output", "cache_read", "cache_write", "reasoning")})
+        cost = _cost({"actual_cost_usd": _complete_sum([_safe_float(m.get("cost")) for m in messages]),
+                      "cost_status": "actual", "cost_source": "OpenCode.message"})
+    else:
+        # shortcut: rollup defaults are indistinguishable from unrecorded usage; require positive counters.
+        recorded = any((_safe_int(row.get("tokens_" + k)) or 0) > 0 for k in ("input", "output", "reasoning", "cache_read", "cache_write"))
+        tokens = _tokens(row if recorded else {}, prefix="tokens_")
+        rollup_cost = _safe_float(row.get("cost"))
+        cost = _cost({"actual_cost_usd": rollup_cost if recorded and rollup_cost else None,
+                      "cost_status": "actual", "cost_source": "OpenCode.session"})
+        if recorded:
+            models = [{"model": _safe_str(row.get("model")), "provider": None, "agent": _safe_str(row.get("agent"))}]
+    identities = {}
+    for key in ("model", "provider", "agent"):
+        values = {m[key] for m in models}
+        identities[key] = next(iter(values)) if len(values) == 1 else None
+    return {"id": row["id"], "title": _safe_str(row.get("title")), "source": "OpenCode",
+            **identities, "models": models, "harness": "OpenCode", "usage_scope": "session",
+            "mapping_source": None, "status": "last_activity", "time_created": row.get("time_created"),
+            "time_updated": row.get("time_updated"), "tokens": tokens, "cost": cost}
+
+
+def _read_opencode_sessions(page, limit):
+    paging = {"total": None, "page": page, "limit": limit, "status": "unavailable"}
+    if hermes_constants.profile_name_for_home(hermes_constants.get_hermes_home()) != "default":
+        return [], dict(paging, status="disabled")
+    if not _OPENCODE_DB.is_file():
+        return [], paging
+    try:
+        with closing(sqlite3.connect(_OPENCODE_DB.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("BEGIN")
+            # directory is canonical project ownership; path must never broaden this filter.
+            total = conn.execute("SELECT COUNT(*) FROM session WHERE directory=?", (_PROJECT_DIR,)).fetchone()[0]
+            rows = conn.execute("SELECT * FROM session WHERE directory=? ORDER BY time_created DESC,id DESC LIMIT ? OFFSET ?",
+                                (_PROJECT_DIR, limit, (page - 1) * limit)).fetchall()
+            messages = {row["id"]: [] for row in rows}
+            if rows and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='message'").fetchone():
+                placeholders = ",".join("?" for _ in rows)
+                for msg in conn.execute(f"SELECT session_id,data FROM message WHERE session_id IN ({placeholders}) ORDER BY id", list(messages)):
+                    try:
+                        data = json.loads(msg["data"])
+                    except (ValueError, TypeError):
+                        # Corrupt telemetry invalidates aggregates, rather than silently undercounting.
+                        data = {"role": "assistant"}
+                    if isinstance(data, dict) and data.get("role") == "assistant":
+                        messages[msg["session_id"]].append(data)
+            result = [_format_opencode(dict(row), messages[row["id"]]) for row in rows]
+        return result, dict(paging, total=total, status="available")
+    except (sqlite3.Error, OSError, ValueError, RuntimeError):
+        return [], paging
+
+
+def _format_run(row, session_map):
+    return {"run_id": row["run_id"], "task_id": row["task_id"], "task_title": row["task_title"],
+            "profile": row["profile"], "step_key": row["step_key"], "status": row["status"],
+            "outcome": row["outcome"], "started_at": row["started_at"], "ended_at": row["ended_at"],
+            "source": "kanban", "agent": None, "harness": "Hermes", "session": session_map.get(row["run_id"])}
+
+
+@router.get("/executions")
+def executions(page: int = Query(1, ge=1, le=92233720368547758), limit: int = Query(25, ge=1, le=100)):
+    try:
+        board = kanban_db.get_current_board()
+        metadata = kanban_db.read_board_metadata(board)
+        if metadata.get("archived"):
+            raise HTTPException(404, "Current Kanban board is archived.")
+        path = kanban_db.kanban_db_path(board).resolve()
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("BEGIN")
+            # LEFT JOIN retains canonical attempts even if their task has been removed.
+            select = """SELECT r.id AS run_id,r.task_id,t.title AS task_title,r.profile,r.step_key,
+                r.status,r.outcome,r.started_at,r.ended_at FROM task_runs r LEFT JOIN tasks t ON t.id=r.task_id """
+            running = conn.execute(select + "WHERE r.ended_at IS NULL ORDER BY r.started_at DESC,r.id DESC").fetchall()
+            total = conn.execute("SELECT COUNT(*) FROM task_runs WHERE ended_at IS NOT NULL").fetchone()[0]
+            history = conn.execute(select + "WHERE r.ended_at IS NOT NULL ORDER BY r.started_at DESC,r.id DESC LIMIT ? OFFSET ?",
+                                   (limit, (page - 1) * limit)).fetchall()
+            sessions = _resolve_session_map(conn, running + history)
+            result = {"board": board, "boardLabel": metadata["name"],
+                      "running": [_format_run(row, sessions) for row in running],
+                      "history": {"rows": [_format_run(row, sessions) for row in history],
+                                  "total": total, "page": page, "limit": limit}, "now": int(time.time())}
+        result["opencode"], result["opencode_history"] = _read_opencode_sessions(page, limit)
+        return result
+    except HTTPException:
+        raise
+    except (sqlite3.Error, OSError, ValueError, RuntimeError) as exc:
+        raise HTTPException(503, "بيانات التنفيذ غير متاحة حالياً.") from exc

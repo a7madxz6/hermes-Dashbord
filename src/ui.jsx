@@ -275,6 +275,77 @@ export function DashboardView({ snapshot, loading, error, refreshing, onRefresh,
   </div>;
 }
 
+const unavailable = 'غير متاح';
+const recordedNumber = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+function executionText(value) {
+  return typeof value === 'string' && value !== '' || typeof value === 'number' ? String(value) : unavailable;
+}
+
+function UsageFigures({ tokens = {}, cost = {} }) {
+  const actual = cost.status === 'actual' && recordedNumber(cost.actual);
+  const estimated = cost.status === 'estimated' && recordedNumber(cost.estimated);
+  const amount = actual ? cost.actual : estimated ? cost.estimated : null;
+  const total = recordedNumber(tokens.input) && recordedNumber(tokens.output) ? tokens.input + tokens.output : null;
+  return <dl className="a7m-execution-fields">
+    {['input','output','cache_read','cache_write','reasoning'].map((key, index) => <div key={key}><dt>{['رموز الإدخال','رموز الإخراج','قراءة التخزين','كتابة التخزين','رموز التفكير'][index]}</dt><dd>{recordedNumber(tokens[key]) ? tokens[key].toLocaleString('en-US') : unavailable}</dd></div>)}
+    <div><dt>الإجمالي · إدخال + إخراج فقط</dt><dd>{total == null ? unavailable : total.toLocaleString('en-US')}</dd></div>
+    <div><dt>التكلفة USD</dt><dd className="a7m-execution-cost">{amount == null ? unavailable : <><bdi dir="ltr">{formatUsd(amount)}</bdi> <span className="a7m-readonly">{actual ? 'فعلية' : 'تقديرية'}</span></>}</dd></div>
+    <div><dt>مصدر التكلفة</dt><dd><bdi>{executionText(cost.source)}</bdi></dd></div>
+  </dl>;
+}
+
+function ExecutionRow({ row, external }) {
+  const session = external ? row : row.session;
+  const fields = [
+    ['مصدر السجل', row.source || (external ? 'OpenCode' : 'kanban')], ['مصدر الجلسة', session?.source],
+    ['المهمة', row.task_id], ['معرّف المحاولة', row.run_id], ['الوكيل المنفّذ', row.agent], ['أداة التنفيذ / Harness', row.harness],
+    ['الملف المسؤول · ليس إثبات هوية المنفّذ', row.profile], ['جلسة العامل', session?.id],
+    ['البداية', external ? dateText(row.time_created == null ? null : new Date(row.time_created).toISOString()) : dateText(row.started_at)],
+    ['النهاية', dateText(external ? session?.ended_at : row.ended_at)], ['النتيجة', row.outcome],
+    ['الموديل · مستوى الجلسة', session?.model], ['المزوّد', session?.provider],
+    ['مصدر الربط', session?.mapping_source], ['سلسلة التفويض المثبتة', null],
+  ];
+  return <article className="a7m-execution-row">
+    <header><h3 dir="auto">{executionText(row.task_title || row.title)}</h3>{external ? <span>آخر نشاط: {row.time_updated == null ? unavailable : dateText(new Date(row.time_updated).toISOString())} · حالة التشغيل غير متاحة</span> : <StateLabel status={row.status} />}</header>
+    <dl className="a7m-execution-fields">{fields.map(([label, value]) => <div key={label}><dt>{label}</dt><dd><bdi dir="auto">{value === '—' ? unavailable : executionText(value)}</bdi></dd></div>)}</dl>
+    <UsageFigures tokens={session?.tokens} cost={session?.cost} />
+    {session?.models?.length > 0 && <details className="a7m-execution-models"><summary>الموديلات المسجلة في الجلسة ({session.models.length})</summary>
+      {session.models.map((model, index) => <div key={index}><p>الموديل: <bdi>{executionText(model.model)}</bdi><br />المزوّد: <bdi>{executionText(model.provider)}</bdi>{external && <><br />الوكيل: <bdi>{executionText(model.agent)}</bdi></>}</p>{!external && <UsageFigures tokens={model.tokens} cost={model.cost} />}</div>)}
+    </details>}
+    <p className="a7m-execution-provenance">نطاق الاستخدام: <bdi>{executionText(session?.usage_scope)}</bdi> · الأرقام على مستوى الجلسة، وليست إثباتًا لاستخدام كل استدعاء أو محاولة. قد تشمل عملًا خارج المحاولة؛ لا تجمع جلسة مشتركة عبر المحاولات. لا تضاف رموز التخزين أو التفكير مرة ثانية.</p>
+  </article>;
+}
+
+export function ExecutionHistory({ data, loading, refreshing, error, page = 1, onPage, onRefresh }) {
+  const history = data?.history;
+  const external = data?.opencode_history;
+  return <div className="a7m-executions">
+    <header className="a7m-topbar"><div className="a7m-brand"><h1>التنفيذ والسجل</h1><span className="a7m-readonly">عرض فقط</span></div>
+      <button className="a7m-button a7m-button-primary" onClick={onRefresh} disabled={loading || refreshing || !onRefresh} aria-busy={Boolean(refreshing)}>تحديث سجل التنفيذ</button>
+    </header>
+    <dl className="a7m-context"><div><dt>اللوحة</dt><dd><bdi>{executionText(data?.boardLabel)}</bdi></dd></div><div><dt>آخر قراءة</dt><dd>{data ? dateText(data.now) : unavailable}</dd></div></dl>
+    {error && <div className="a7m-notice" role="alert"><strong>{data ? 'تعذر التحديث. البيانات المعروضة قديمة.' : 'تعذر تحميل سجل التنفيذ.'}</strong><span>{error}</span></div>}
+    {!data ? <p role="status" className="a7m-empty">{loading ? 'جارٍ تحميل سجل التنفيذ…' : 'بيانات التنفيذ غير متاحة.'}</p> : <>
+      <section aria-label="تشغيلات Kanban الحالية"><div className="a7m-section-head"><h2>يجري الآن · Kanban</h2><span className="a7m-section-note">الحالة من سجل المهام، لا اتصال الوكيل</span></div>
+        {data.running?.length ? data.running.map(row => <ExecutionRow key={row.run_id} row={row} />) : <p className="a7m-empty">لا توجد محاولات قيد التنفيذ.</p>}
+      </section>
+      <section aria-label="سجل محاولات Kanban"><div className="a7m-section-head"><h2>سجل محاولات Kanban</h2><span className="a7m-section-note">{history?.total ?? unavailable} محاولة محفوظة</span></div>
+        {history?.rows?.length ? history.rows.map(row => <ExecutionRow key={row.run_id} row={row} />) : <p className="a7m-empty">لا توجد محاولات في هذه الصفحة.</p>}
+        <nav className="a7m-catalog-pagination" aria-label="صفحات سجل التنفيذ">
+          <button className="a7m-button a7m-button-secondary" aria-label="صفحة السجل السابقة" disabled={page <= 1 || loading || refreshing} onClick={() => onPage(page - 1)}>السابق</button>
+          <span role="status">صفحة {page}</span>
+          <button className="a7m-button a7m-button-secondary" aria-label="صفحة السجل التالية" disabled={!history || (page * history.limit >= history.total && (external?.total == null || page * external.limit >= external.total)) || loading || refreshing} onClick={() => onPage(page + 1)}>التالي</button>
+        </nav>
+      </section>
+      <section aria-label="جلسات OpenCode للمشروع"><div className="a7m-section-head"><h2>جلسات OpenCode للمشروع</h2></div>
+        <p className="a7m-execution-provenance">مصدر مستقل؛ لا يوجد ربط مثبت بمحاولات Kanban، ولا يُستنتج التشغيل من حداثة النشاط. استهلاك Hermes منفصل ولا يُجمع مع استهلاك العامل.</p>
+        {data.opencode?.length ? data.opencode.map(row => <ExecutionRow key={row.id} row={row} external />) : <p className="a7m-empty">{external?.status === 'available' ? 'لا توجد جلسات من OpenCode في هذه الصفحة.' : external?.status === 'disabled' ? 'مصدر OpenCode غير مفعّل لهذا الملف الشخصي.' : 'مصدر OpenCode غير متاح.'}</p>}
+      </section>
+      <footer className="a7m-footer"><span>المصدر: <bdi>Hermes Kanban · task_runs / OpenCode</bdi> · {dateText(data.now)}</span><span>السجل محفوظ في المصدر الأصلي؛ حذفه من المصدر يزيل إتاحته هنا.</span></footer>
+    </>}
+  </div>;
+}
+
 function ModelRow({ model }) {
   const prices = model.prices || {}
   return <details className="a7m-model-row">
