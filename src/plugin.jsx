@@ -3,6 +3,7 @@ import { host, gatewayActivationEpoch, useQuery, useValue, ROUTES_AREA, SIDEBAR_
 import { DashboardView, ModelCatalog, ExecutionHistory, Welcome } from './ui.jsx'
 import { normalizeBoard } from './data.mjs'
 import { normalizeModels } from './models.mjs'
+import { connectionError } from './connection-error.mjs'
 import css from './style.css'
 
 // Only observe the SDK's local scalar; network polling stays in useQuery.
@@ -119,7 +120,7 @@ function Dashboard({ ctx }) {
           </div>
           <div role="tabpanel" id="tabpanel-executions" aria-label="التنفيذ والسجل" hidden={activeTab !== 'executions'}>
             <ExecutionHistory data={executionsData} loading={executionQuery.isPending} refreshing={executionQuery.isFetching} page={page}
-              error={executionQuery.error ? 'تعذر قراءة سجل التنفيذ. تحقق من الاتصال ثم أعد المحاولة.' : null}
+              error={executionQuery.error ? connectionError(executionQuery.error) : null}
               onPage={page => setExecutionPage({profile, epoch, page})} onRefresh={() => executionQuery.refetch()} />
           </div>
         </div>
